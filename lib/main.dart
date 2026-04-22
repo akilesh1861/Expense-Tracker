@@ -234,7 +234,7 @@ class ExpenseRepository {
       'Date,Title,Type,Category,Amount,Note',
       ...entries.map(
         (e) => [
-          e.date.toIso8601String().split('T').first,
+          dateLabel(e.date),
           _csv(e.title),
           e.type.label,
           _csv(e.category),
@@ -783,7 +783,7 @@ class _Sidebar extends StatelessWidget {
               children: [
                 Text('Portfolio', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: LuxeColors.gold)),
                 const SizedBox(height: 8),
-                Text('\$${summary.balance.toStringAsFixed(2)}', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
+                Text(formatCurrency(summary.balance), style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
                 const SizedBox(height: 4),
                 Text('Net balance in current view', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: LuxeColors.textSoft)),
               ],
@@ -956,7 +956,7 @@ class _MetricCard extends StatelessWidget {
         children: [
           Text(title, style: Theme.of(context).textTheme.titleMedium?.copyWith(color: LuxeColors.textSoft)),
           const SizedBox(height: 10),
-          Text('\$${value.toStringAsFixed(2)}', style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: color, fontWeight: FontWeight.w800)),
+          Text(formatCurrency(value), style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: color, fontWeight: FontWeight.w800)),
         ],
       ),
     );
@@ -1108,7 +1108,7 @@ class _TransactionTable extends StatelessWidget {
         ),
         _cell(Text(entry.category, style: style)),
         _cell(Text(entry.type.label, style: style?.copyWith(color: entry.type == EntryType.income ? LuxeColors.orangeSoft : LuxeColors.ember))),
-        _cell(Text('\$${entry.amount.toStringAsFixed(2)}', style: style?.copyWith(fontWeight: FontWeight.w700))),
+        _cell(Text(formatCurrency(entry.amount), style: style?.copyWith(fontWeight: FontWeight.w700))),
         _cell(
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -1290,7 +1290,7 @@ class _CategoryAnalytics extends StatelessWidget {
                       Container(width: 10, height: 10, decoration: BoxDecoration(color: slice.color, shape: BoxShape.circle)),
                       const SizedBox(width: 8),
                       Expanded(child: Text(slice.label)),
-                      Text('\$${slice.value.toStringAsFixed(0)}', style: const TextStyle(color: LuxeColors.textSoft)),
+                      Text(formatCurrency(slice.value, decimals: 0), style: const TextStyle(color: LuxeColors.textSoft)),
                     ],
                   ),
                 ),
@@ -1636,7 +1636,7 @@ class BarChartPainter extends CustomPainter {
       textPainter.paint(canvas, Offset(0, y + 8));
 
       textPainter.text = TextSpan(
-        text: '\$${slice.value.toStringAsFixed(0)}',
+        text: formatCurrency(slice.value, decimals: 0),
         style: const TextStyle(color: LuxeColors.textSoft, fontSize: 12, fontWeight: FontWeight.w600),
       );
       textPainter.layout();
@@ -1674,7 +1674,7 @@ class DonutChartPainter extends CustomPainter {
 
     final textPainter = TextPainter(textDirection: TextDirection.ltr);
     textPainter.text = TextSpan(
-      text: 'Share\n\$${total.toStringAsFixed(0)}',
+      text: 'Share\n${formatCurrency(total, decimals: 0)}',
       style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700),
     );
     textPainter.textAlign = TextAlign.center;
@@ -1909,7 +1909,9 @@ String monthLabel(DateTime date) {
 }
 
 String dateLabel(DateTime date) {
-  return '${date.month}/${date.day}/${date.year}';
+  final day = date.day.toString().padLeft(2, '0');
+  final month = date.month.toString().padLeft(2, '0');
+  return '$day/$month/${date.year}';
 }
 
 String shortDayLabel(DateTime date) {
@@ -1934,10 +1936,14 @@ String compactCurrency(double value) {
   if (value >= 1000) {
     final short = value / 1000;
     return short == short.roundToDouble()
-        ? '\$${short.toStringAsFixed(0)}k'
-        : '\$${short.toStringAsFixed(1)}k';
+        ? '₹${short.toStringAsFixed(0)}k'
+        : '₹${short.toStringAsFixed(1)}k';
   }
   return value == value.roundToDouble()
-      ? '\$${value.toStringAsFixed(0)}'
-      : '\$${value.toStringAsFixed(1)}';
+      ? '₹${value.toStringAsFixed(0)}'
+      : '₹${value.toStringAsFixed(1)}';
+}
+
+String formatCurrency(double value, {int decimals = 2}) {
+  return '₹${value.toStringAsFixed(decimals)}';
 }
