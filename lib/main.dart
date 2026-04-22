@@ -1929,7 +1929,8 @@ String shortDayLabel(DateTime date) {
     'Nov',
     'Dec',
   ];
-  return '${months[date.month - 1]} ${date.day}';
+  final day = date.day.toString().padLeft(2, '0');
+  return '$day ${months[date.month - 1]}';
 }
 
 String compactCurrency(double value) {
