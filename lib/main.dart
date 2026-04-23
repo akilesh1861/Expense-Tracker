@@ -165,6 +165,84 @@ class TrendPoint {
   final double amount;
 }
 
+class RecurringEntry {
+  RecurringEntry({
+    required this.id,
+    required this.title,
+    required this.amount,
+    required this.dayOfMonth,
+    required this.type,
+    required this.category,
+    this.note = '',
+    this.active = true,
+  });
+
+  final String id;
+  String title;
+  double amount;
+  int dayOfMonth;
+  EntryType type;
+  String category;
+  String note;
+  bool active;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'amount': amount,
+        'dayOfMonth': dayOfMonth,
+        'type': type.name,
+        'category': category,
+        'note': note,
+        'active': active,
+      };
+
+  factory RecurringEntry.fromJson(Map<String, dynamic> json) {
+    return RecurringEntry(
+      id: json['id'] as String,
+      title: json['title'] as String,
+      amount: (json['amount'] as num).toDouble(),
+      dayOfMonth: (json['dayOfMonth'] as num).toInt(),
+      type: EntryType.values.byName(json['type'] as String),
+      category: json['category'] as String,
+      note: (json['note'] as String?) ?? '',
+      active: (json['active'] as bool?) ?? true,
+    );
+  }
+
+  String occurrenceId(DateTime month) => 'recurring_${id}_${month.year}_${month.month}';
+
+  ExpenseEntry toEntry(DateTime month) {
+    final lastDay = DateTime(month.year, month.month + 1, 0).day;
+    final day = dayOfMonth.clamp(1, lastDay);
+    return ExpenseEntry(
+      id: occurrenceId(month),
+      title: title,
+      amount: amount,
+      date: DateTime(month.year, month.month, day),
+      type: type,
+      category: category,
+      note: note.isEmpty ? 'Recurring entry' : note,
+    );
+  }
+}
+
+class DashboardInsights {
+  const DashboardInsights({
+    required this.biggestExpense,
+    required this.topCategory,
+    required this.averageDailySpend,
+    required this.safeToSpend,
+    required this.projectedMonthEnd,
+  });
+
+  final ExpenseEntry? biggestExpense;
+  final MapEntry<String, double>? topCategory;
+  final double averageDailySpend;
+  final double safeToSpend;
+  final double projectedMonthEnd;
+}
+
 class ExpenseRepository {
   ExpenseRepository();
 
@@ -181,6 +259,8 @@ class ExpenseRepository {
 
   File get _entriesFile => File('${_baseDir.path}/entries.json');
   File get _categoriesFile => File('${_baseDir.path}/categories.json');
+  File get _budgetsFile => File('${_baseDir.path}/budgets.json');
+  File get _recurringFile => File('${_baseDir.path}/recurring.json');
 
   Future<List<CategoryDefinition>> loadCategories() async {
     if (!_categoriesFile.existsSync()) {
@@ -228,6 +308,32 @@ class ExpenseRepository {
     );
   }
 
+  Future<Map<String, double>> loadBudgets() async {
+    if (!_budgetsFile.existsSync()) return {};
+    final raw = await _budgetsFile.readAsString();
+    final decoded = jsonDecode(raw) as Map<String, dynamic>;
+    return decoded.map((key, value) => MapEntry(key, (value as num).toDouble()));
+  }
+
+  Future<void> saveBudgets(Map<String, double> budgets) async {
+    await _budgetsFile.writeAsString(jsonEncode(budgets));
+  }
+
+  Future<List<RecurringEntry>> loadRecurringEntries() async {
+    if (!_recurringFile.existsSync()) return [];
+    final raw = await _recurringFile.readAsString();
+    return (jsonDecode(raw) as List<dynamic>)
+        .cast<Map<String, dynamic>>()
+        .map(RecurringEntry.fromJson)
+        .toList();
+  }
+
+  Future<void> saveRecurringEntries(List<RecurringEntry> recurringEntries) async {
+    await _recurringFile.writeAsString(
+      jsonEncode(recurringEntries.map((entry) => entry.toJson()).toList()),
+    );
+  }
+
   Future<File> exportCsv(List<ExpenseEntry> entries) async {
     final file = File('${_baseDir.path}/expense_export.csv');
     final rows = <String>[
@@ -245,6 +351,48 @@ class ExpenseRepository {
     ];
     await file.writeAsString(rows.join('\n'));
     return file;
+  }
+
+  Future<List<ExpenseEntry>> importCsv(String path, List<CategoryDefinition> categories) async {
+    final file = File(path.trim());
+    if (!file.existsSync()) {
+      throw const FileSystemException('CSV file does not exist');
+    }
+
+    final lines = await file.readAsLines();
+    final imported = <ExpenseEntry>[];
+    for (int i = 1; i < lines.length; i++) {
+      final values = parseCsvLine(lines[i]);
+      if (values.length < 5) continue;
+
+      final date = parseFlexibleDate(values[0]);
+      final amount = double.tryParse(values[4].replaceAll('₹', '').replaceAll(',', '').trim());
+      if (date == null || amount == null) continue;
+
+      final typeText = values[2].trim().toLowerCase();
+      final type = EntryType.values.firstWhere(
+        (entryType) => entryType.name == typeText || entryType.label.toLowerCase() == typeText,
+        orElse: () => EntryType.expense,
+      );
+      final fallbackCategory = categories.firstWhere(
+        (item) => item.type == type,
+        orElse: () => defaultCategories.firstWhere((item) => item.type == type),
+      );
+      final category = values[3].trim().isEmpty ? fallbackCategory.name : values[3].trim();
+
+      imported.add(
+        ExpenseEntry(
+          id: 'import_${DateTime.now().microsecondsSinceEpoch}_$i',
+          title: values[1].trim().isEmpty ? 'Imported entry' : values[1].trim(),
+          amount: amount,
+          date: date,
+          type: type,
+          category: category,
+          note: values.length > 5 ? values[5].trim() : '',
+        ),
+      );
+    }
+    return imported;
   }
 
   String _csv(String value) => '"${value.replaceAll('"', '""')}"';
@@ -336,6 +484,8 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
 
   List<ExpenseEntry> entries = [];
   List<CategoryDefinition> categories = [];
+  Map<String, double> budgets = {};
+  List<RecurringEntry> recurringEntries = [];
 
   DateTime selectedMonth = DateTime(DateTime.now().year, DateTime.now().month);
   EntryTypeFilter typeFilter = EntryTypeFilter.all;
@@ -362,10 +512,14 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
   Future<void> _load() async {
     final loadedCategories = await repository.loadCategories();
     final loadedEntries = await repository.loadEntries();
+    final loadedBudgets = await repository.loadBudgets();
+    final loadedRecurring = await repository.loadRecurringEntries();
 
     setState(() {
       categories = loadedCategories;
       entries = loadedEntries;
+      budgets = loadedBudgets;
+      recurringEntries = loadedRecurring;
       newCategory = categoriesFor(newType).isNotEmpty ? categoriesFor(newType).first.name : null;
     });
   }
@@ -390,6 +544,13 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
       ..sort((a, b) => b.date.compareTo(a.date));
   }
 
+  List<ExpenseEntry> get monthEntries {
+    return entries.where((entry) {
+      return entry.date.year == selectedMonth.year && entry.date.month == selectedMonth.month;
+    }).toList()
+      ..sort((a, b) => b.date.compareTo(a.date));
+  }
+
   ExpenseSummary get summary {
     double income = 0;
     double expense = 0;
@@ -401,6 +562,45 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
       }
     }
     return ExpenseSummary(income: income, expenses: expense);
+  }
+
+  ExpenseSummary get monthSummary {
+    double income = 0;
+    double expense = 0;
+    for (final entry in monthEntries) {
+      if (entry.type == EntryType.income) {
+        income += entry.amount;
+      } else {
+        expense += entry.amount;
+      }
+    }
+    return ExpenseSummary(income: income, expenses: expense);
+  }
+
+  Map<String, double> get monthExpenseTotalsByCategory {
+    final totals = <String, double>{};
+    for (final entry in monthEntries.where((entry) => entry.type == EntryType.expense)) {
+      totals.update(entry.category, (value) => value + entry.amount, ifAbsent: () => entry.amount);
+    }
+    return totals;
+  }
+
+  DashboardInsights get insights {
+    final expenses = monthEntries.where((entry) => entry.type == EntryType.expense).toList();
+    final biggest = expenses.isEmpty ? null : expenses.reduce((a, b) => a.amount >= b.amount ? a : b);
+    final categoryTotals = monthExpenseTotalsByCategory.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final now = DateTime.now();
+    final lastDay = DateTime(selectedMonth.year, selectedMonth.month + 1, 0).day;
+    final elapsedDays = selectedMonth.year == now.year && selectedMonth.month == now.month ? now.day : lastDay;
+    final averageDaily = elapsedDays == 0 ? 0.0 : monthSummary.expenses / elapsedDays;
+    final projectedExpenses = averageDaily * lastDay;
+    return DashboardInsights(
+      biggestExpense: biggest,
+      topCategory: categoryTotals.isEmpty ? null : categoryTotals.first,
+      averageDailySpend: averageDaily,
+      safeToSpend: math.max(0, monthSummary.balance / math.max(1, lastDay - elapsedDays + 1)),
+      projectedMonthEnd: monthSummary.income - projectedExpenses,
+    );
   }
 
   List<ChartSliceData> get categorySlices {
@@ -457,6 +657,8 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
   Future<void> _persist() async {
     await repository.saveEntries(entries);
     await repository.saveCategories(categories);
+    await repository.saveBudgets(budgets);
+    await repository.saveRecurringEntries(recurringEntries);
   }
 
   Future<void> _addEntry() async {
@@ -543,9 +745,17 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
           setState(() {
             final oldName = category.name;
             category.name = trimmed;
+            if (budgets.containsKey(oldName)) {
+              budgets[trimmed] = budgets.remove(oldName)!;
+            }
             for (final entry in entries) {
               if (entry.type == category.type && entry.category == oldName) {
                 entry.category = trimmed;
+              }
+            }
+            for (final recurring in recurringEntries) {
+              if (recurring.type == category.type && recurring.category == oldName) {
+                recurring.category = trimmed;
               }
             }
             if (newCategory == oldName) {
@@ -564,10 +774,16 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
               .firstWhere((_) => true, orElse: () => null);
           setState(() {
             categories.removeWhere((c) => c.id == category.id);
+            budgets.remove(category.name);
             if (fallback != null) {
               for (final entry in entries) {
                 if (entry.category == category.name && entry.type == category.type) {
                   entry.category = fallback;
+                }
+              }
+              for (final recurring in recurringEntries) {
+                if (recurring.category == category.name && recurring.type == category.type) {
+                  recurring.category = fallback;
                 }
               }
             }
@@ -586,9 +802,96 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
     _setStatus('Categories updated.');
   }
 
+  Future<void> _manageBudgets() async {
+    final updated = await showDialog<Map<String, double>>(
+      context: context,
+      builder: (context) => BudgetManagerDialog(
+        expenseCategories: categoriesFor(EntryType.expense),
+        budgets: budgets,
+        spending: monthExpenseTotalsByCategory,
+      ),
+    );
+    if (updated == null) return;
+    setState(() => budgets = updated);
+    await repository.saveBudgets(budgets);
+    _setStatus('Budgets updated.');
+  }
+
+  Future<void> _manageRecurring() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => RecurringManagerDialog(
+        recurringEntries: recurringEntries,
+        categories: categories,
+        onAdd: (entry) {
+          setState(() => recurringEntries.add(entry));
+        },
+        onDelete: (entry) {
+          setState(() => recurringEntries.removeWhere((item) => item.id == entry.id));
+        },
+      ),
+    );
+    await repository.saveRecurringEntries(recurringEntries);
+    _setStatus('Recurring entries updated.');
+  }
+
+  Future<void> _applyRecurringEntries() async {
+    final additions = recurringEntries
+        .where((entry) => entry.active)
+        .where((entry) => entries.every((existing) => existing.id != entry.occurrenceId(selectedMonth)))
+        .map((entry) => entry.toEntry(selectedMonth))
+        .toList();
+
+    if (additions.isEmpty) {
+      _setStatus('No new recurring entries for ${monthLabel(selectedMonth)}.');
+      return;
+    }
+
+    setState(() {
+      entries.insertAll(0, additions);
+    });
+    await repository.saveEntries(entries);
+    _setStatus('${additions.length} recurring entr${additions.length == 1 ? 'y' : 'ies'} added.');
+  }
+
   Future<void> _exportCsv() async {
     final file = await repository.exportCsv(entries);
     _setStatus('CSV exported to ${file.path}');
+  }
+
+  Future<void> _importCsv() async {
+    final path = await showDialog<String>(
+      context: context,
+      builder: (context) => const ImportCsvDialog(),
+    );
+    if (path == null || path.trim().isEmpty) return;
+
+    try {
+      final imported = await repository.importCsv(path, categories);
+      if (imported.isEmpty) {
+        _setStatus('No valid entries found in CSV.');
+        return;
+      }
+      setState(() {
+        entries.insertAll(0, imported);
+        for (final entry in imported) {
+          final exists = categories.any((category) => category.name == entry.category && category.type == entry.type);
+          if (!exists) {
+            categories.add(
+              CategoryDefinition(
+                id: 'imported_category_${DateTime.now().microsecondsSinceEpoch}_${entry.category}',
+                name: entry.category,
+                type: entry.type,
+              ),
+            );
+          }
+        }
+      });
+      await _persist();
+      _setStatus('${imported.length} entr${imported.length == 1 ? 'y' : 'ies'} imported.');
+    } catch (error) {
+      _setStatus('Import failed: $error');
+    }
   }
 
   void _setStatus(String message) {
@@ -612,103 +915,126 @@ class _ExpenseDashboardPageState extends State<ExpenseDashboardPage> {
             onManageCategories: _manageCategories,
           ),
           Expanded(
-            child: Scrollbar(
-              thumbVisibility: true,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minWidth: 1280),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final dashboardWidth = math.max(constraints.maxWidth, 1500.0);
+                final contentWidth = dashboardWidth - 48;
+                final tableWidth = contentWidth - 320 - 18;
+                final analyticsCardWidth = (contentWidth - 18) / 2;
+
+                return Scrollbar(
+                  thumbVisibility: true,
                   child: SingleChildScrollView(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _SummaryHeader(
-                          selectedMonth: selectedMonth,
-                          summary: summary,
-                          onMonthChanged: (date) {
-                            setState(() {
-                              selectedMonth = DateTime(date.year, date.month);
-                            });
-                          },
-                        ),
-                        const SizedBox(height: 18),
-                        _FiltersRow(
-                          controller: searchController,
-                          typeFilter: typeFilter,
-                          onTypeFilterChanged: (value) => setState(() => typeFilter = value),
-                          onSearchChanged: (_) => setState(() {}),
-                          onExport: _exportCsv,
-                          statusMessage: statusMessage,
-                        ),
-                        const SizedBox(height: 18),
-                        Row(
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: dashboardWidth,
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              child: _TransactionTable(
-                                entries: displayEntries,
-                                onDelete: _deleteEntry,
-                                onEdit: _editEntry,
-                              ),
+                            _SummaryHeader(
+                              selectedMonth: selectedMonth,
+                              summary: summary,
+                              insights: insights,
+                              onMonthChanged: (date) {
+                                setState(() {
+                                  selectedMonth = DateTime(date.year, date.month);
+                                });
+                              },
                             ),
-                            const SizedBox(width: 18),
-                            SizedBox(
-                              width: 320,
-                              child: _AddEntryCard(
-                                titleController: titleController,
-                                amountController: amountController,
-                                noteController: noteController,
-                                type: newType,
-                                categories: categoriesFor(newType),
-                                selectedCategory: newCategory,
-                                onTypeChanged: (value) {
-                                  setState(() {
-                                    newType = value;
-                                    final list = categoriesFor(value);
-                                    newCategory = list.isNotEmpty ? list.first.name : null;
-                                  });
-                                },
-                                onCategoryChanged: (value) => setState(() => newCategory = value),
-                                onSubmit: _addEntry,
-                                onManageCategories: _manageCategories,
-                              ),
+                            const SizedBox(height: 18),
+                            _FiltersRow(
+                              controller: searchController,
+                              typeFilter: typeFilter,
+                              onTypeFilterChanged: (value) => setState(() => typeFilter = value),
+                              onSearchChanged: (_) => setState(() {}),
+                              onExport: _exportCsv,
+                              onImport: _importCsv,
+                              onManageRecurring: _manageRecurring,
+                              onApplyRecurring: _applyRecurringEntries,
+                              statusMessage: statusMessage,
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 18),
-                        Text(
-                          'Analytics',
-                          style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 14),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: _AnalyticsCard(
-                                title: 'Spending Breakdown',
-                                subtitle: 'Category share for this month',
-                                child: _CategoryAnalytics(
-                                  slices: categorySlices,
+                            const SizedBox(height: 18),
+                            _BudgetOverview(
+                              budgets: budgets,
+                              spending: monthExpenseTotalsByCategory,
+                              onManageBudgets: _manageBudgets,
+                            ),
+                            const SizedBox(height: 18),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                SizedBox(
+                                  width: tableWidth,
+                                  child: _TransactionTable(
+                                    entries: displayEntries,
+                                    onDelete: _deleteEntry,
+                                    onEdit: _editEntry,
+                                  ),
                                 ),
-                              ),
+                                const SizedBox(width: 18),
+                                SizedBox(
+                                  width: 320,
+                                  child: _AddEntryCard(
+                                    titleController: titleController,
+                                    amountController: amountController,
+                                    noteController: noteController,
+                                    type: newType,
+                                    categories: categoriesFor(newType),
+                                    selectedCategory: newCategory,
+                                    onTypeChanged: (value) {
+                                      setState(() {
+                                        newType = value;
+                                        final list = categoriesFor(value);
+                                        newCategory = list.isNotEmpty ? list.first.name : null;
+                                      });
+                                    },
+                                    onCategoryChanged: (value) => setState(() => newCategory = value),
+                                    onSubmit: _addEntry,
+                                    onManageCategories: _manageCategories,
+                                    onManageBudgets: _manageBudgets,
+                                  ),
+                                ),
+                              ],
                             ),
-                            const SizedBox(width: 18),
-                            Expanded(
-                              child: _AnalyticsCard(
-                                title: 'Spending Over Time',
-                                subtitle: 'Daily expense totals in the current month',
-                                child: _LineChart(points: trendPoints),
-                              ),
+                            const SizedBox(height: 18),
+                            Text(
+                              'Analytics',
+                              style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
+                            ),
+                            const SizedBox(height: 14),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                SizedBox(
+                                  width: analyticsCardWidth,
+                                  child: _AnalyticsCard(
+                                    title: 'Spending Breakdown',
+                                    subtitle: 'Category share for this month',
+                                    child: _CategoryAnalytics(
+                                      slices: categorySlices,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 18),
+                                SizedBox(
+                                  width: analyticsCardWidth,
+                                  child: _AnalyticsCard(
+                                    title: 'Spending Over Time',
+                                    subtitle: 'Daily expense totals in the current month',
+                                    child: _LineChart(points: trendPoints),
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ),
+                );
+              },
             ),
           ),
         ],
@@ -748,57 +1074,61 @@ class _Sidebar extends StatelessWidget {
         border: Border(right: BorderSide(color: LuxeColors.line)),
       ),
       padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Categories', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: LuxeColors.orangeSoft)),
-          const SizedBox(height: 10),
-          _SidebarButton(
-            selected: selectedCategory == null,
-            label: 'All Categories',
-            onTap: () => onSelectCategory(null),
+      child: SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Categories', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: LuxeColors.orangeSoft)),
+              const SizedBox(height: 10),
+              _SidebarButton(
+                selected: selectedCategory == null,
+                label: 'All Categories',
+                onTap: () => onSelectCategory(null),
+              ),
+              const SizedBox(height: 12),
+              const _SidebarGroupTitle('EXPENSES'),
+              ...expenseCategories.map(
+                (category) => _SidebarButton(
+                  selected: selectedCategory?.id == category.id,
+                  label: category.name,
+                  onTap: () => onSelectCategory(category),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const _SidebarGroupTitle('INCOME'),
+              ...incomeCategories.map(
+                (category) => _SidebarButton(
+                  selected: selectedCategory?.id == category.id,
+                  label: category.name,
+                  onTap: () => onSelectCategory(category),
+                ),
+              ),
+              const SizedBox(height: 28),
+              _Panel(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Portfolio', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: LuxeColors.gold)),
+                    const SizedBox(height: 8),
+                    Text(formatCurrency(summary.balance), style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
+                    const SizedBox(height: 4),
+                    Text('Net balance in current view', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: LuxeColors.textSoft)),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: LuxeColors.orange,
+                  minimumSize: const Size.fromHeight(48),
+                ),
+                onPressed: onManageCategories,
+                child: const Text('Manage Categories'),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          const _SidebarGroupTitle('EXPENSES'),
-          ...expenseCategories.map(
-            (category) => _SidebarButton(
-              selected: selectedCategory?.id == category.id,
-              label: category.name,
-              onTap: () => onSelectCategory(category),
-            ),
-          ),
-          const SizedBox(height: 12),
-          const _SidebarGroupTitle('INCOME'),
-          ...incomeCategories.map(
-            (category) => _SidebarButton(
-              selected: selectedCategory?.id == category.id,
-              label: category.name,
-              onTap: () => onSelectCategory(category),
-            ),
-          ),
-          const Spacer(),
-          _Panel(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Portfolio', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: LuxeColors.gold)),
-                const SizedBox(height: 8),
-                Text(formatCurrency(summary.balance), style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
-                const SizedBox(height: 4),
-                Text('Net balance in current view', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: LuxeColors.textSoft)),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: LuxeColors.orange,
-              minimumSize: const Size.fromHeight(48),
-            ),
-            onPressed: onManageCategories,
-            child: const Text('Manage Categories'),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -865,11 +1195,13 @@ class _SummaryHeader extends StatelessWidget {
   const _SummaryHeader({
     required this.selectedMonth,
     required this.summary,
+    required this.insights,
     required this.onMonthChanged,
   });
 
   final DateTime selectedMonth;
   final ExpenseSummary summary;
+  final DashboardInsights insights;
   final ValueChanged<DateTime> onMonthChanged;
 
   @override
@@ -918,6 +1250,97 @@ class _SummaryHeader extends StatelessWidget {
               Expanded(child: _MetricCard(title: 'Balance', value: summary.balance, color: summary.balance >= 0 ? LuxeColors.gold : LuxeColors.orange)),
             ],
           ),
+          const SizedBox(height: 16),
+          _InsightsRow(insights: insights),
+        ],
+      ),
+    );
+  }
+}
+
+class _InsightsRow extends StatelessWidget {
+  const _InsightsRow({required this.insights});
+
+  final DashboardInsights insights;
+
+  @override
+  Widget build(BuildContext context) {
+    final biggest = insights.biggestExpense;
+    final topCategory = insights.topCategory;
+    return Row(
+      children: [
+        Expanded(
+          child: _InsightTile(
+            title: 'Biggest Expense',
+            value: biggest == null ? 'None yet' : formatCurrency(biggest.amount),
+            subtitle: biggest?.title ?? 'No expenses this month',
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _InsightTile(
+            title: 'Top Category',
+            value: topCategory == null ? 'None yet' : topCategory.key,
+            subtitle: topCategory == null ? 'No category spend' : formatCurrency(topCategory.value),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _InsightTile(
+            title: 'Daily Average',
+            value: formatCurrency(insights.averageDailySpend),
+            subtitle: 'Average spend so far',
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _InsightTile(
+            title: 'Safe To Spend',
+            value: formatCurrency(insights.safeToSpend),
+            subtitle: 'Per remaining day',
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _InsightTile(
+            title: 'Projected Balance',
+            value: formatCurrency(insights.projectedMonthEnd),
+            subtitle: 'At month end',
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InsightTile extends StatelessWidget {
+  const _InsightTile({
+    required this.title,
+    required this.value,
+    required this.subtitle,
+  });
+
+  final String title;
+  final String value;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: LuxeColors.gold.withValues(alpha: 0.14)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: Theme.of(context).textTheme.labelMedium?.copyWith(color: LuxeColors.textSoft)),
+          const SizedBox(height: 8),
+          Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: LuxeColors.textSoft)),
         ],
       ),
     );
@@ -970,6 +1393,9 @@ class _FiltersRow extends StatelessWidget {
     required this.onTypeFilterChanged,
     required this.onSearchChanged,
     required this.onExport,
+    required this.onImport,
+    required this.onManageRecurring,
+    required this.onApplyRecurring,
     required this.statusMessage,
   });
 
@@ -978,6 +1404,9 @@ class _FiltersRow extends StatelessWidget {
   final ValueChanged<EntryTypeFilter> onTypeFilterChanged;
   final ValueChanged<String> onSearchChanged;
   final Future<void> Function() onExport;
+  final Future<void> Function() onImport;
+  final Future<void> Function() onManageRecurring;
+  final Future<void> Function() onApplyRecurring;
   final String statusMessage;
 
   @override
@@ -1013,9 +1442,145 @@ class _FiltersRow extends StatelessWidget {
               child: Text(statusMessage, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: LuxeColors.gold)),
             ),
           OutlinedButton.icon(
+            onPressed: onImport,
+            icon: const Icon(Icons.upload_file_rounded),
+            label: const Text('Import CSV'),
+          ),
+          const SizedBox(width: 10),
+          OutlinedButton.icon(
+            onPressed: onManageRecurring,
+            icon: const Icon(Icons.repeat_rounded),
+            label: const Text('Recurring'),
+          ),
+          const SizedBox(width: 10),
+          OutlinedButton.icon(
+            onPressed: onApplyRecurring,
+            icon: const Icon(Icons.auto_awesome_rounded),
+            label: const Text('Apply'),
+          ),
+          const SizedBox(width: 10),
+          OutlinedButton.icon(
             onPressed: onExport,
             icon: const Icon(Icons.download_rounded),
             label: const Text('Export CSV'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BudgetOverview extends StatelessWidget {
+  const _BudgetOverview({
+    required this.budgets,
+    required this.spending,
+    required this.onManageBudgets,
+  });
+
+  final Map<String, double> budgets;
+  final Map<String, double> spending;
+  final Future<void> Function() onManageBudgets;
+
+  @override
+  Widget build(BuildContext context) {
+    final activeBudgets = budgets.entries.where((entry) => entry.value > 0).toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final totalBudget = activeBudgets.fold<double>(0, (sum, entry) => sum + entry.value);
+    final totalSpend = activeBudgets.fold<double>(0, (sum, entry) => sum + (spending[entry.key] ?? 0));
+
+    return _Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Budgets', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 4),
+                  Text(
+                    activeBudgets.isEmpty
+                        ? 'Set monthly category limits to track overspending.'
+                        : '${formatCurrency(totalSpend)} used of ${formatCurrency(totalBudget)}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: LuxeColors.textSoft),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              FilledButton.tonal(
+                onPressed: onManageBudgets,
+                child: const Text('Manage Budgets'),
+              ),
+            ],
+          ),
+          if (activeBudgets.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 14,
+              runSpacing: 14,
+              children: [
+                for (final budget in activeBudgets.take(6))
+                  _BudgetChip(
+                    category: budget.key,
+                    budget: budget.value,
+                    spent: spending[budget.key] ?? 0,
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _BudgetChip extends StatelessWidget {
+  const _BudgetChip({
+    required this.category,
+    required this.budget,
+    required this.spent,
+  });
+
+  final String category;
+  final double budget;
+  final double spent;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = budget <= 0 ? 0.0 : (spent / budget).clamp(0.0, 1.0);
+    final over = spent > budget;
+    return Container(
+      width: 285,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: (over ? LuxeColors.ember : LuxeColors.gold).withValues(alpha: 0.20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text(category, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700))),
+              Text('${(progress * 100).round()}%', style: TextStyle(color: over ? LuxeColors.ember : LuxeColors.gold, fontWeight: FontWeight.w700)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 9,
+              backgroundColor: Colors.white.withValues(alpha: 0.08),
+              valueColor: AlwaysStoppedAnimation(over ? LuxeColors.ember : LuxeColors.orange),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${formatCurrency(spent)} / ${formatCurrency(budget)}',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: LuxeColors.textSoft),
           ),
         ],
       ),
@@ -1146,6 +1711,7 @@ class _AddEntryCard extends StatelessWidget {
     required this.onCategoryChanged,
     required this.onSubmit,
     required this.onManageCategories,
+    required this.onManageBudgets,
   });
 
   final TextEditingController titleController;
@@ -1158,6 +1724,7 @@ class _AddEntryCard extends StatelessWidget {
   final ValueChanged<String?> onCategoryChanged;
   final Future<void> Function() onSubmit;
   final Future<void> Function() onManageCategories;
+  final Future<void> Function() onManageBudgets;
 
   @override
   Widget build(BuildContext context) {
@@ -1211,6 +1778,12 @@ class _AddEntryCard extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: onManageBudgets,
+            icon: const Icon(Icons.savings_rounded),
+            label: const Text('Budgets'),
           ),
         ],
       ),
@@ -1349,6 +1922,319 @@ class _Panel extends StatelessWidget {
         ],
       ),
       child: child,
+    );
+  }
+}
+
+class BudgetManagerDialog extends StatefulWidget {
+  const BudgetManagerDialog({
+    super.key,
+    required this.expenseCategories,
+    required this.budgets,
+    required this.spending,
+  });
+
+  final List<CategoryDefinition> expenseCategories;
+  final Map<String, double> budgets;
+  final Map<String, double> spending;
+
+  @override
+  State<BudgetManagerDialog> createState() => _BudgetManagerDialogState();
+}
+
+class _BudgetManagerDialogState extends State<BudgetManagerDialog> {
+  late final Map<String, TextEditingController> controllers;
+
+  @override
+  void initState() {
+    super.initState();
+    controllers = {
+      for (final category in widget.expenseCategories)
+        category.name: TextEditingController(
+          text: (widget.budgets[category.name] ?? 0) == 0 ? '' : (widget.budgets[category.name] ?? 0).toStringAsFixed(0),
+        ),
+    };
+  }
+
+  @override
+  void dispose() {
+    for (final controller in controllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: LuxeColors.panel,
+      title: const Text('Monthly Budgets'),
+      content: SizedBox(
+        width: 620,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final category in widget.expenseCategories)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(category.name, style: const TextStyle(fontWeight: FontWeight.w700)),
+                            Text(
+                              'Spent ${formatCurrency(widget.spending[category.name] ?? 0)} this month',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: LuxeColors.textSoft),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      SizedBox(
+                        width: 180,
+                        child: TextField(
+                          controller: controllers[category.name],
+                          decoration: const InputDecoration(labelText: 'Budget'),
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+        FilledButton(
+          onPressed: () {
+            final updated = <String, double>{};
+            for (final entry in controllers.entries) {
+              final value = double.tryParse(entry.value.text.trim());
+              if (value != null && value > 0) {
+                updated[entry.key] = value;
+              }
+            }
+            Navigator.of(context).pop(updated);
+          },
+          child: const Text('Save Budgets'),
+        ),
+      ],
+    );
+  }
+}
+
+class RecurringManagerDialog extends StatefulWidget {
+  const RecurringManagerDialog({
+    super.key,
+    required this.recurringEntries,
+    required this.categories,
+    required this.onAdd,
+    required this.onDelete,
+  });
+
+  final List<RecurringEntry> recurringEntries;
+  final List<CategoryDefinition> categories;
+  final void Function(RecurringEntry entry) onAdd;
+  final void Function(RecurringEntry entry) onDelete;
+
+  @override
+  State<RecurringManagerDialog> createState() => _RecurringManagerDialogState();
+}
+
+class _RecurringManagerDialogState extends State<RecurringManagerDialog> {
+  final titleController = TextEditingController();
+  final amountController = TextEditingController();
+  final dayController = TextEditingController(text: '1');
+  final noteController = TextEditingController();
+  late List<RecurringEntry> localEntries;
+  EntryType type = EntryType.expense;
+  String? category;
+
+  @override
+  void initState() {
+    super.initState();
+    localEntries = [...widget.recurringEntries];
+    category = categoriesForType(type).isNotEmpty ? categoriesForType(type).first.name : null;
+  }
+
+  @override
+  void dispose() {
+    titleController.dispose();
+    amountController.dispose();
+    dayController.dispose();
+    noteController.dispose();
+    super.dispose();
+  }
+
+  List<CategoryDefinition> categoriesForType(EntryType entryType) {
+    return widget.categories.where((item) => item.type == entryType).toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final availableCategories = categoriesForType(type);
+    return AlertDialog(
+      backgroundColor: LuxeColors.panel,
+      title: const Text('Recurring Entries'),
+      content: SizedBox(
+        width: 760,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (localEntries.isEmpty)
+                Text('No recurring entries yet.', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: LuxeColors.textSoft))
+              else
+                for (final entry in localEntries)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.04),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text('${entry.title} • ${formatCurrency(entry.amount)} • Day ${entry.dayOfMonth} • ${entry.category}'),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            widget.onDelete(entry);
+                            setState(() => localEntries.removeWhere((item) => item.id == entry.id));
+                          },
+                          child: const Text('Delete', style: TextStyle(color: LuxeColors.ember)),
+                        ),
+                      ],
+                    ),
+                  ),
+              const Divider(height: 28),
+              Text('Add Recurring Entry', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(child: TextField(controller: titleController, decoration: const InputDecoration(labelText: 'Title'))),
+                  const SizedBox(width: 12),
+                  SizedBox(width: 140, child: TextField(controller: amountController, decoration: const InputDecoration(labelText: 'Amount'), keyboardType: TextInputType.number)),
+                  const SizedBox(width: 12),
+                  SizedBox(width: 120, child: TextField(controller: dayController, decoration: const InputDecoration(labelText: 'Day'), keyboardType: TextInputType.number)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  SegmentedButton<EntryType>(
+                    segments: const [
+                      ButtonSegment(value: EntryType.expense, label: Text('Expense')),
+                      ButtonSegment(value: EntryType.income, label: Text('Income')),
+                    ],
+                    selected: {type},
+                    onSelectionChanged: (selection) {
+                      setState(() {
+                        type = selection.first;
+                        final list = categoriesForType(type);
+                        category = list.isEmpty ? null : list.first.name;
+                      });
+                    },
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      value: category,
+                      decoration: const InputDecoration(labelText: 'Category'),
+                      items: availableCategories.map((item) => DropdownMenuItem(value: item.name, child: Text(item.name))).toList(),
+                      onChanged: (value) => setState(() => category = value),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              TextField(controller: noteController, decoration: const InputDecoration(labelText: 'Note')),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Done')),
+        FilledButton(
+          onPressed: () {
+            final amount = double.tryParse(amountController.text.trim());
+            final day = int.tryParse(dayController.text.trim());
+            if (titleController.text.trim().isEmpty || amount == null || day == null || category == null) return;
+            final entry = RecurringEntry(
+              id: DateTime.now().microsecondsSinceEpoch.toString(),
+              title: titleController.text.trim(),
+              amount: amount,
+              dayOfMonth: day.clamp(1, 31),
+              type: type,
+              category: category!,
+              note: noteController.text.trim(),
+            );
+            widget.onAdd(entry);
+            setState(() {
+              localEntries.add(entry);
+              titleController.clear();
+              amountController.clear();
+              noteController.clear();
+            });
+          },
+          child: const Text('Add'),
+        ),
+      ],
+    );
+  }
+}
+
+class ImportCsvDialog extends StatefulWidget {
+  const ImportCsvDialog({super.key});
+
+  @override
+  State<ImportCsvDialog> createState() => _ImportCsvDialogState();
+}
+
+class _ImportCsvDialogState extends State<ImportCsvDialog> {
+  final pathController = TextEditingController();
+
+  @override
+  void dispose() {
+    pathController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: LuxeColors.panel,
+      title: const Text('Import CSV'),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Paste a CSV path. Expected columns: Date, Title, Type, Category, Amount, Note.',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: LuxeColors.textSoft),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: pathController,
+              decoration: const InputDecoration(labelText: 'CSV file path'),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.of(context).pop(pathController.text), child: const Text('Import')),
+      ],
     );
   }
 }
@@ -1909,6 +2795,9 @@ String monthLabel(DateTime date) {
 }
 
 String dateLabel(DateTime date) {
+  if (!Platform.isWindows) {
+    return '${date.month}/${date.day}/${date.year}';
+  }
   final day = date.day.toString().padLeft(2, '0');
   final month = date.month.toString().padLeft(2, '0');
   return '$day/$month/${date.year}';
@@ -1930,21 +2819,76 @@ String shortDayLabel(DateTime date) {
     'Dec',
   ];
   final day = date.day.toString().padLeft(2, '0');
-  return '$day ${months[date.month - 1]}';
+  return Platform.isWindows ? '$day ${months[date.month - 1]}' : '${months[date.month - 1]} $day';
 }
 
 String compactCurrency(double value) {
+  final symbol = Platform.isWindows ? '₹' : r'$';
   if (value >= 1000) {
     final short = value / 1000;
     return short == short.roundToDouble()
-        ? '₹${short.toStringAsFixed(0)}k'
-        : '₹${short.toStringAsFixed(1)}k';
+        ? '$symbol${short.toStringAsFixed(0)}k'
+        : '$symbol${short.toStringAsFixed(1)}k';
   }
   return value == value.roundToDouble()
-      ? '₹${value.toStringAsFixed(0)}'
-      : '₹${value.toStringAsFixed(1)}';
+      ? '$symbol${value.toStringAsFixed(0)}'
+      : '$symbol${value.toStringAsFixed(1)}';
 }
 
 String formatCurrency(double value, {int decimals = 2}) {
-  return '₹${value.toStringAsFixed(decimals)}';
+  final symbol = Platform.isWindows ? '₹' : r'$';
+  return '$symbol${value.toStringAsFixed(decimals)}';
+}
+
+List<String> parseCsvLine(String line) {
+  final values = <String>[];
+  final buffer = StringBuffer();
+  var inQuotes = false;
+
+  for (int i = 0; i < line.length; i++) {
+    final char = line[i];
+    if (char == '"') {
+      if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+        buffer.write('"');
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char == ',' && !inQuotes) {
+      values.add(buffer.toString());
+      buffer.clear();
+    } else {
+      buffer.write(char);
+    }
+  }
+
+  values.add(buffer.toString());
+  return values;
+}
+
+DateTime? parseFlexibleDate(String input) {
+  final trimmed = input.trim();
+  if (trimmed.isEmpty) return null;
+
+  final slashParts = trimmed.split('/');
+  if (slashParts.length == 3) {
+    final day = int.tryParse(slashParts[0]);
+    final month = int.tryParse(slashParts[1]);
+    final year = int.tryParse(slashParts[2]);
+    if (day != null && month != null && year != null) {
+      return DateTime(year, month, day);
+    }
+  }
+
+  final dashParts = trimmed.split('-');
+  if (dashParts.length == 3) {
+    final yearFirst = int.tryParse(dashParts[0]);
+    final month = int.tryParse(dashParts[1]);
+    final day = int.tryParse(dashParts[2]);
+    if (yearFirst != null && month != null && day != null && dashParts[0].length == 4) {
+      return DateTime(yearFirst, month, day);
+    }
+  }
+
+  return DateTime.tryParse(trimmed);
 }
